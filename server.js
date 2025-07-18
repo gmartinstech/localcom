@@ -6,7 +6,21 @@ const { WebSocketServer } = require('ws');
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = 'localhost';
-const port = process.env.PORT || 3000;
+
+// Helper to get port from command line arguments
+const getPort = () => {
+  const portArg = process.argv.find(arg => arg.startsWith('--port='));
+  if (portArg) {
+    return parseInt(portArg.split('=')[1], 10);
+  }
+  const portFlagIndex = process.argv.indexOf('--port');
+  if (portFlagIndex !== -1 && process.argv[portFlagIndex + 1]) {
+      return parseInt(process.argv[portFlagIndex + 1], 10);
+  }
+  return process.env.PORT || 3000;
+};
+
+const port = getPort();
 // when using middleware `hostname` and `port` must be provided below
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
