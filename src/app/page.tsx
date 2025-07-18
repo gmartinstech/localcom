@@ -1,3 +1,9 @@
+import { LocalComUI } from '@/components/local-com-ui';
+
 export default function Home() {
-  return <></>;
+  return (
+    <main>
+      <LocalComUI />
+    </main>
+  );
 }
