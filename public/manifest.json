@@ -1,21 +1,22 @@
+
 {
   "name": "LocalCom",
   "short_name": "LocalCom",
+  "description": "P2P Voice and Data Communication on a Local Network",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#F0F4F8",
   "theme_color": "#A0D2EB",
-  "description": "P2P voice and data communication over local network.",
   "icons": [
     {
-      "src": "/icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png"
+      "src": "/icon-192x192.png",
+      "type": "image/png",
+      "sizes": "192x192"
     },
     {
-      "src": "/icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png"
+      "src": "/icon-512x512.png",
+      "type": "image/png",
+      "sizes": "512x512"
     }
   ]
 }
