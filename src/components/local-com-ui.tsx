@@ -7,7 +7,6 @@ import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Phone, PhoneOff, Send, Wifi, WifiOff, MessageSquare, Headset } from 'lucide-react';
-import { Separator } from '@/components/ui/separator';
 import { useToast } from '@/hooks/use-toast';
 import { initDB, addMessage, getMessages } from '@/lib/indexedDB';
 
@@ -18,12 +17,15 @@ type Message = {
   timestamp: string;
 };
 
+type CallStatus = 'idle' | 'calling' | 'in-call' | 'receiving-call';
+
 export function LocalComUI() {
   const { toast } = useToast();
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
-  const [callStatus, setCallStatus] = useState<'idle' | 'calling' | 'in-call'>('idle');
+  const [callStatus, setCallStatus] = useState<CallStatus>('idle');
   const [messages, setMessages] = useState<Message[]>([]);
   const [textMessage, setTextMessage] = useState('');
+  const [incomingOffer, setIncomingOffer] = useState<RTCSessionDescriptionInit | null>(null);
 
   const ws = useRef<WebSocket | null>(null);
   const pc = useRef<RTCPeerConnection | null>(null);
@@ -48,15 +50,20 @@ export function LocalComUI() {
 
       if (message.offer) {
         if (pc.current) {
-          console.warn('Existing peer connection. Ignoring offer.');
+          console.warn('Existing peer connection or ongoing call. Ignoring offer.');
           return;
         }
-        await handleOffer(message.offer);
+        setIncomingOffer(message.offer);
+        setCallStatus('receiving-call');
       } else if (message.answer) {
-        await pc.current?.setRemoteDescription(new RTCSessionDescription(message.answer));
+        if(pc.current?.signalingState === 'have-local-offer') {
+            await pc.current?.setRemoteDescription(new RTCSessionDescription(message.answer));
+        }
       } else if (message.candidate) {
         try {
-          await pc.current?.addIceCandidate(new RTCIceCandidate(message.candidate));
+          if (pc.current?.signalingState !== 'closed') {
+             await pc.current?.addIceCandidate(new RTCIceCandidate(message.candidate));
+          }
         } catch (e) {
           console.error('Error adding received ice candidate', e);
         }
@@ -77,6 +84,10 @@ export function LocalComUI() {
   }, [toast]);
   
   const setupPeerConnection = useCallback(() => {
+      if (pc.current) {
+          console.log("Peer connection already exists.");
+          return;
+      }
       pc.current = new RTCPeerConnection();
 
       pc.current.onicecandidate = (event) => {
@@ -94,6 +105,12 @@ export function LocalComUI() {
 
       pc.current.ondatachannel = (event) => {
           setupDataChannel(event.channel);
+      };
+
+      pc.current.onconnectionstatechange = () => {
+        if (pc.current?.connectionState === 'disconnected' || pc.current?.connectionState === 'closed' || pc.current?.connectionState === 'failed') {
+            handleEndCall();
+        }
       };
       
       if (localStream.current) {
@@ -131,16 +148,24 @@ export function LocalComUI() {
       handleEndCall();
     };
   }, [initializeWebSocket]);
+
+  const getMediaPermissions = async () => {
+      if (localStream.current) return true;
+      try {
+        localStream.current = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        return true;
+      } catch (error) {
+          console.error('Error accessing media devices.', error);
+          toast({ title: 'Erro de Microfone', description: 'Não foi possível acessar o microfone. Verifique as permissões.', variant: 'destructive'});
+          return false;
+      }
+  }
   
   const handleStartCall = async () => {
     if (callStatus !== 'idle') return;
     setCallStatus('calling');
     
-    try {
-      localStream.current = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    } catch (error) {
-        console.error('Error accessing media devices.', error);
-        toast({ title: 'Erro de Microfone', description: 'Não foi possível acessar o microfone. Verifique as permissões.', variant: 'destructive'});
+    if (!await getMediaPermissions()) {
         setCallStatus('idle');
         return;
     }
@@ -148,6 +173,10 @@ export function LocalComUI() {
     setupPeerConnection();
     const channel = pc.current!.createDataChannel("chat");
     setupDataChannel(channel);
+    
+    localStream.current!.getTracks().forEach(track => {
+        pc.current?.addTrack(track, localStream.current!);
+    });
 
     const offer = await pc.current!.createOffer();
     await pc.current!.setLocalDescription(offer);
@@ -162,26 +191,31 @@ export function LocalComUI() {
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = null;
     }
+    dataChannel.current?.close();
+    dataChannel.current = null;
     setCallStatus('idle');
+    setIncomingOffer(null);
   };
   
-  const handleOffer = async (offer: RTCSessionDescriptionInit) => {
+  const handleAnswerCall = async () => {
+    if (!incomingOffer) return;
     setCallStatus('calling');
-    setupPeerConnection();
-    await pc.current!.setRemoteDescription(new RTCSessionDescription(offer));
     
-    try {
-        localStream.current = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        localStream.current.getTracks().forEach(track => pc.current!.addTrack(track, localStream.current!));
-    } catch (error) {
-        console.error("Failed to get local stream:", error);
-        toast({ title: "Erro de Microfone", description: "Não foi possível iniciar a chamada.", variant: "destructive" });
+    if (!await getMediaPermissions()) {
+        setCallStatus('idle');
+        setIncomingOffer(null);
         return;
     }
+    
+    setupPeerConnection();
+    await pc.current!.setRemoteDescription(new RTCSessionDescription(incomingOffer));
+    
+    localStream.current!.getTracks().forEach(track => pc.current!.addTrack(track, localStream.current!));
     
     const answer = await pc.current!.createAnswer();
     await pc.current!.setLocalDescription(answer);
     ws.current?.send(JSON.stringify({ answer }));
+    setIncomingOffer(null); // Clear the offer once handled
   };
 
   const handleSendMessage = () => {
@@ -197,9 +231,11 @@ export function LocalComUI() {
       addMessage(messageToSend);
       setTextMessage('');
     } else {
-        toast({ title: 'Chat não disponível', description: 'O canal de texto não está aberto. Inicie uma chamada.', variant: 'destructive'});
+        toast({ title: 'Chat não disponível', description: 'O canal de texto não está aberto. Inicie ou atenda uma chamada.', variant: 'destructive'});
     }
   };
+
+  const isCallActive = callStatus === 'in-call' || callStatus === 'calling';
 
   return (
     <div className="flex flex-col h-screen bg-background text-foreground font-body p-4 md:p-8">
@@ -216,13 +252,19 @@ export function LocalComUI() {
         <Card className="flex flex-col shadow-lg">
           <CardHeader>
             <CardTitle className="flex items-center"><Headset className="mr-3 text-primary"/> Controles da Chamada</CardTitle>
-            <CardDescription>Inicie ou encerre uma chamada de voz P2P</CardDescription>
+            <CardDescription>Inicie, atenda ou encerre uma chamada de voz P2P</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col items-center justify-center flex-1 gap-4">
             <div className="flex space-x-4">
-              <Button size="lg" onClick={handleStartCall} disabled={callStatus !== 'idle' || connectionStatus !== 'connected'} className="w-40">
-                <Phone className="mr-2 h-5 w-5" /> Iniciar Chamada
-              </Button>
+             {callStatus === 'receiving-call' ? (
+                <Button size="lg" onClick={handleAnswerCall} className="w-40 bg-green-500 hover:bg-green-600">
+                    <Phone className="mr-2 h-5 w-5" /> Atender
+                </Button>
+             ) : (
+                <Button size="lg" onClick={handleStartCall} disabled={isCallActive || callStatus === 'receiving-call' || connectionStatus !== 'connected'} className="w-40">
+                    <Phone className="mr-2 h-5 w-5" /> Iniciar Chamada
+                </Button>
+             )}
               <Button size="lg" onClick={handleEndCall} disabled={callStatus === 'idle'} variant="destructive" className="w-40">
                 <PhoneOff className="mr-2 h-5 w-5" /> Encerrar
               </Button>
@@ -233,6 +275,7 @@ export function LocalComUI() {
                     {callStatus === 'idle' && 'Inativa'}
                     {callStatus === 'calling' && 'Chamando...'}
                     {callStatus === 'in-call' && 'Em chamada'}
+                    {callStatus === 'receiving-call' && 'Recebendo chamada...'}
                 </p>
             </div>
             <audio ref={remoteAudioRef} autoPlay playsInline controls={false} className="hidden" />
